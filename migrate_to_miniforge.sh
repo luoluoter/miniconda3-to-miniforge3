@@ -4,13 +4,13 @@ set -euo pipefail
 # ============================================================
 # Miniconda/Anaconda -> Miniforge3 migration (idempotent, safer)
 # - Scheme A: export envs from Miniconda, recreate in Miniforge
-# - Compliance: enforce conda-forge only; warn on risky sources
+# - Compliance: enforce conda-forge only; check configs/sources for risky endpoints
 # - Shell init: bash/zsh/fish if present
 # - Optional safe removal: move Miniconda to backup after verification
 # ------------------------------------------------------------
 # Miniconda/Anaconda -> Miniforge3 迁移脚本（幂等、更安全）
 # - 方案 A：从 Miniconda 导出环境，再在 Miniforge 中重建
-# - 合规：强制仅使用 conda-forge；对风险来源给出告警
+# - 合规：强制仅使用 conda-forge；检查配置/来源并给出告警
 # - Shell 初始化：如存在则支持 bash / zsh / fish
 # - 可选安全移除：验证通过后，将 Miniconda 移动到备份目录（默认不删除）
 # ============================================================
@@ -23,7 +23,6 @@ DO_MIGRATE_ENVS="${DO_MIGRATE_ENVS:-1}"          # 1 migrate envs, 0 skip
 CLEAN_RC="${CLEAN_RC:-1}"                        # 1 clean old conda init blocks, 0 skip
 AUTO_ACTIVATE_BASE="${AUTO_ACTIVATE_BASE:-false}"
 
-# Optional safe removal (disabled by default)
 # Optional safe removal
 REMOVE_MINICONDA="${REMOVE_MINICONDA:-1}"        # 1 move miniconda away after verification, 0 keep
 MINICONDA_BACKUP_PARENT="${MINICONDA_BACKUP_PARENT:-$HOME}"
@@ -46,6 +45,23 @@ BACKUP_DIR="${BACKUP_DIR:-}"
 # - 1: auto-fix risky channels in Miniforge config (recommended)
 # - 0: only warn
 ENFORCE_COMPLIANCE="${ENFORCE_COMPLIANCE:-1}"
+
+# Deep-clean hidden defaults mappings (default_channels/custom_channels/custom_multichannels)
+# - 1: remove repo.anaconda.com defaults mappings from Miniforge config (recommended)
+# - 0: keep current behavior (only clean channels list)
+ENFORCE_DEEP_COMPLIANCE="${ENFORCE_DEEP_COMPLIANCE:-1}"
+
+# If your org forbids ANY anaconda.org domains, set this to your mirror alias.
+# Example: https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud
+CHANNEL_ALIAS_OVERRIDE="${CHANNEL_ALIAS_OVERRIDE:-}"
+ALLOW_ANACONDA_ORG="${ALLOW_ANACONDA_ORG:-1}"  # 1 allow conda.anaconda.org (default), 0 warn
+
+# Compliance check options (policy-only, optional)
+STRICT_EXIT="${STRICT_EXIT:-0}"   # 1 => exit nonzero if post-migration high-risk remains
+USER_LIMIT="${USER_LIMIT:-200}"   # org size threshold (policy-dependent)
+USER_COUNT="${USER_COUNT:-}"      # set externally if desired (e.g., LDAP/SSO count)
+CHECK_PATH_CONDA="${CHECK_PATH_CONDA:-1}"  # 1 => also check conda on PATH
+SCAN_YML_DIR="${SCAN_YML_DIR:-}"  # optional: extra directory to scan for exported YAMLs
 
 # Auto-detect conda installs when *_DIR is invalid:
 # - 1: try to detect Miniconda base dir automatically (recommended)
@@ -76,6 +92,36 @@ log()  { echo -e "\033[1;32m[+]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
 die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+resolve_python_bin() {
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    if [[ "$PYTHON_BIN" == /* ]]; then
+      [[ -x "$PYTHON_BIN" ]] && return 0
+    else
+      have "$PYTHON_BIN" && return 0
+    fi
+  fi
+
+  if [[ -x "$MINIFORGE_DIR/bin/python" ]]; then
+    PYTHON_BIN="$MINIFORGE_DIR/bin/python"
+    return 0
+  fi
+  if have python3; then
+    PYTHON_BIN="python3"
+    return 0
+  fi
+  if have python; then
+    PYTHON_BIN="python"
+    return 0
+  fi
+  return 1
+}
+
+require_python() {
+  resolve_python_bin || die "python is required for this step (set PYTHON_BIN or install python3)."
+}
 
 nearest_existing_parent() {
   local p="$1"
@@ -205,6 +251,42 @@ detect_conda_base_dir() {
   "$conda_bin" info --base 2>/dev/null || true
 }
 
+path_looks_like_miniforge() {
+  local p="${1:-}"
+  local lp
+  lp="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lp" == *miniforge* || "$lp" == *mambaforge* ]]
+}
+
+auto_detect_miniforge_dir() {
+  # Best-effort detection: prefer known locations, then conda on PATH.
+  local candidate base
+  for candidate in \
+    "$MINIFORGE_DIR" \
+    "$HOME/miniforge3" \
+    "$HOME/miniforge" \
+    "$HOME/mambaforge" \
+    "/opt/miniforge3" \
+    "/opt/miniforge" \
+    "/opt/mambaforge"
+  do
+    if [[ -x "$candidate/bin/conda" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  if have conda; then
+    base="$(detect_conda_base_dir "$(command -v conda)")"
+    if [[ -n "$base" && -x "$base/bin/conda" ]] && path_looks_like_miniforge "$base"; then
+      echo "$base"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 auto_detect_miniconda_dir() {
   # Best-effort detection: prefer known locations, then conda on PATH.
   local candidate base
@@ -215,7 +297,7 @@ auto_detect_miniconda_dir() {
     "/opt/miniconda3" \
     "/opt/anaconda3"
   do
-    if [[ -x "$candidate/bin/conda" && "$candidate" != "$MINIFORGE_DIR" ]]; then
+    if [[ -x "$candidate/bin/conda" && "$candidate" != "$MINIFORGE_DIR" ]] && ! path_looks_like_miniforge "$candidate"; then
       echo "$candidate"
       return 0
     fi
@@ -223,7 +305,7 @@ auto_detect_miniconda_dir() {
 
   if have conda; then
     base="$(detect_conda_base_dir "$(command -v conda)")"
-    if [[ -n "$base" && -x "$base/bin/conda" && "$base" != "$MINIFORGE_DIR" ]]; then
+    if [[ -n "$base" && -x "$base/bin/conda" && "$base" != "$MINIFORGE_DIR" ]] && ! path_looks_like_miniforge "$base"; then
       echo "$base"
       return 0
     fi
@@ -262,6 +344,15 @@ Key environment variables (defaults shown):
   MINICONDA_DELETE_BACKUP=${MINICONDA_DELETE_BACKUP:-"<prompt if interactive>"}  # 1 delete, 0 keep, unset prompt/keep
   SANITIZE_EXPORTED_YMLS=${SANITIZE_EXPORTED_YMLS:-"<prompt if interactive>"}    # 1 sanitize, 0 skip, unset prompt/skip
   ENFORCE_COMPLIANCE=$ENFORCE_COMPLIANCE                                        # 1 auto-fix Miniforge, 0 warn only
+  ENFORCE_DEEP_COMPLIANCE=$ENFORCE_DEEP_COMPLIANCE                              # 1 clean defaults mappings, 0 skip
+  ALLOW_ANACONDA_ORG=$ALLOW_ANACONDA_ORG                                        # 1 allow conda.anaconda.org, 0 warn
+  CHANNEL_ALIAS_OVERRIDE=${CHANNEL_ALIAS_OVERRIDE:-"<unset>"}                   # set to mirror if org forbids anaconda.org
+  STRICT_EXIT=$STRICT_EXIT                                                      # 1 exit nonzero if post-migration still risky
+  USER_LIMIT=$USER_LIMIT                                                        # org size threshold (policy-only)
+  USER_COUNT=${USER_COUNT:-"<unset>"}                                           # set externally if you want to check
+  CHECK_PATH_CONDA=$CHECK_PATH_CONDA                                            # 1 also check conda on PATH
+  SCAN_YML_DIR=${SCAN_YML_DIR:-"<unset>"}                                       # extra YAML scan dir
+  PYTHON_BIN=${PYTHON_BIN:-"<auto>"}                                            # python3/python fallback
   AUTO_DETECT_CONDA_DIRS=$AUTO_DETECT_CONDA_DIRS                                # 1 auto-detect dirs, 0 strict
   FORCE_REMOVE_MINICONDA_BROKEN=${FORCE_REMOVE_MINICONDA_BROKEN:-"<prompt if interactive>"}  # 1 proceed, 0 abort, unset prompt/abort
   MINIFORGE_MIN_FREE_GB=$MINIFORGE_MIN_FREE_GB                                  # minimum free space for Miniforge target
@@ -371,7 +462,11 @@ clean_fish_conf() {
   [[ -f "$FISH_CONF" ]] || touch "$FISH_CONF"
   backup_file "$FISH_CONF"
 
-  python3 - <<'PY'
+  if ! resolve_python_bin; then
+    warn "python not found; skipping fish config cleanup."
+    return 0
+  fi
+  "$PYTHON_BIN" - <<'PY'
 import os, re
 p=os.path.expanduser("~/.config/fish/config.fish")
 s=open(p,"r",encoding="utf-8",errors="ignore").read()
@@ -383,14 +478,233 @@ PY
 }
 
 # ===== Compliance helpers =====
-is_risky_channel_line() {
-  # risky if:
-  # - defaults
-  # - pkgs/main or pkgs/free (including mirrors like tuna)
-  # - repo.anaconda.com / conda.anaconda.org
-  # - any URL containing /anaconda/pkgs/(main|free)
-  echo "$1" | grep -Eiq \
-    '(^|[[:space:]])defaults([[:space:]]|$)|pkgs/(main|free)|repo\.anaconda\.com|conda\.anaconda\.org|/anaconda/pkgs/(main|free)'
+COMPLIANCE_POST_HIGH_RISK=0
+COMPLIANCE_WARN_FOUND=0
+
+extract_conda_block() {
+  local text="$1"
+  local key="$2"
+  echo "$text" | awk -v k="$key" '
+    BEGIN{p=0}
+    $0 ~ "^"k"$" {p=1; print; next}
+    p==1 && $0 ~ "^[^[:space:]].*:$" {exit}
+    p==1 {print}
+  '
+}
+
+resolve_conda_bin() {
+  local conda_bin="$1"
+  if [[ "$conda_bin" == "PATH" ]]; then
+    if have conda; then
+      command -v conda
+    else
+      echo ""
+    fi
+  else
+    echo "$conda_bin"
+  fi
+}
+
+conda_config_show() {
+  local conda_bin="$1"
+  if [[ "$conda_bin" == "$MINIFORGE_DIR/bin/conda" ]]; then
+    miniforge_conda config --show 2>/dev/null || true
+  elif [[ "$conda_bin" == "$MINICONDA_DIR/bin/conda" ]]; then
+    if miniconda_can_run_conda; then
+      miniconda_conda config --show 2>/dev/null || true
+    else
+      return 1
+    fi
+  else
+    "$conda_bin" config --show 2>/dev/null || true
+  fi
+}
+
+conda_config_sources() {
+  local conda_bin="$1"
+  if [[ "$conda_bin" == "$MINIFORGE_DIR/bin/conda" ]]; then
+    miniforge_conda config --show-sources 2>/dev/null || true
+  elif [[ "$conda_bin" == "$MINICONDA_DIR/bin/conda" ]]; then
+    if miniconda_can_run_conda; then
+      miniconda_conda config --show-sources 2>/dev/null || true
+    else
+      return 1
+    fi
+  else
+    "$conda_bin" config --show-sources 2>/dev/null || true
+  fi
+}
+
+check_user_count() {
+  log "Compliance check: organization size (policy-only)"
+  log "USER_LIMIT=$USER_LIMIT (set USER_COUNT if you want to check)"
+  if [[ -z "${USER_COUNT}" ]]; then
+    warn "USER_COUNT not provided -> skip (policy-only; conda cannot infer org size)."
+    return 0
+  fi
+  if ! [[ "${USER_COUNT}" =~ ^[0-9]+$ ]]; then
+    warn "USER_COUNT is not a number: ${USER_COUNT} -> skip"
+    return 0
+  fi
+  if [[ "${USER_COUNT}" -gt "${USER_LIMIT}" ]]; then
+    warn "USER_COUNT exceeds ${USER_LIMIT}: ${USER_COUNT} > ${USER_LIMIT} (policy attention)."
+    COMPLIANCE_WARN_FOUND=1
+  else
+    log "USER_COUNT within limit: ${USER_COUNT} <= ${USER_LIMIT}"
+  fi
+}
+
+check_conda_compliance() {
+  local input_bin="$1"
+  local label="$2"
+  local stage="${3:-pre}"
+  local conda_bin cfg src
+
+  conda_bin="$(resolve_conda_bin "$input_bin")"
+  if [[ -z "$conda_bin" ]]; then
+    warn "($label) conda not found"
+    return 0
+  fi
+  if [[ ! -x "$conda_bin" ]]; then
+    warn "($label) conda not executable: $conda_bin"
+    return 0
+  fi
+
+  log "Compliance check ($label)"
+  log "conda path: $conda_bin"
+
+  cfg="$(conda_config_show "$conda_bin" || true)"
+  src="$(conda_config_sources "$conda_bin" || true)"
+  if [[ -z "$cfg" ]]; then
+    warn "($label) conda config unavailable (conda may be broken or moved)."
+    return 0
+  fi
+
+  local has_defaults_in_channels=0
+  local has_repo_anaconda_pkgs=0
+  local alias_is_anaconda_org=0
+  local alias_line=""
+  local has_anaconda_org=0
+
+  echo "$cfg" | awk '
+    BEGIN{p=0}
+    /^channels:$/ {p=1; next}
+    p==1 && /^[^[:space:]].*:$/{exit}
+    p==1 {print}
+  ' | grep -Eiq '^\s*-\s*defaults\s*$' && has_defaults_in_channels=1
+
+  echo "$cfg" | grep -Eiq 'repo\.anaconda\.com/pkgs/(main|r)|/anaconda/pkgs/(main|r)|pkgs/(main|r)' && has_repo_anaconda_pkgs=1
+
+  alias_line="$(echo "$cfg" | grep -E '^channel_alias:\s*' || true)"
+  echo "$alias_line" | grep -Eiq 'channel_alias:\s*https?://conda\.anaconda\.org' && alias_is_anaconda_org=1
+
+  echo "$cfg" | grep -Eiq 'conda\.anaconda\.org' && has_anaconda_org=1
+
+  if [[ "$has_defaults_in_channels" == "1" ]]; then
+    warn "($label) HIGH-RISK: 'defaults' is configured in channels."
+    echo "Evidence:"
+    extract_conda_block "$cfg" "channels:" | sed 's/^/  /'
+  fi
+
+  if [[ "$has_repo_anaconda_pkgs" == "1" ]]; then
+    warn "($label) HIGH-RISK: pkgs/main or pkgs/r endpoints present in config."
+    echo "Evidence:"
+    extract_conda_block "$cfg" "default_channels:" | sed 's/^/  /'
+    extract_conda_block "$cfg" "custom_channels:" | sed 's/^/  /'
+    extract_conda_block "$cfg" "custom_multichannels:" | sed 's/^/  /'
+  fi
+
+  if [[ "$alias_is_anaconda_org" == "1" && "$ALLOW_ANACONDA_ORG" == "0" ]]; then
+    warn "($label) WARN: channel_alias points to conda.anaconda.org and ALLOW_ANACONDA_ORG=0."
+    echo "Evidence:"
+    echo "  ${alias_line}"
+    COMPLIANCE_WARN_FOUND=1
+  fi
+
+  if [[ "$has_defaults_in_channels" == "0" && "$has_repo_anaconda_pkgs" == "0" ]]; then
+    if [[ "$alias_is_anaconda_org" == "1" && "$ALLOW_ANACONDA_ORG" == "0" ]]; then
+      log "($label) PASS with WARN (policy-dependent alias)."
+    else
+      log "($label) PASS: no defaults and no pkgs/main|pkgs/r endpoints."
+    fi
+  else
+    if [[ "$stage" == "post" ]]; then
+      COMPLIANCE_POST_HIGH_RISK=1
+    fi
+  fi
+
+  if [[ "$has_defaults_in_channels" == "1" || "$has_repo_anaconda_pkgs" == "1" || ( "$alias_is_anaconda_org" == "1" && "$ALLOW_ANACONDA_ORG" == "0" ) ]]; then
+    if [[ -n "$src" ]]; then
+      echo
+      log "Config sources (where settings come from):"
+      echo "$src" | sed 's/^/  /'
+    fi
+  fi
+
+  if [[ "$ALLOW_ANACONDA_ORG" == "0" && "$has_anaconda_org" == "1" && "$alias_is_anaconda_org" == "0" ]]; then
+    warn "($label) WARN: conda.anaconda.org present in config while ALLOW_ANACONDA_ORG=0."
+    COMPLIANCE_WARN_FOUND=1
+  fi
+}
+
+deep_clean_miniforge_defaults_mappings() {
+  # Remove hidden defaults mappings that may still point to repo.anaconda.com.
+  # Idempotent: safe to run multiple times.
+  miniforge_can_run_conda || return 1
+
+  miniforge_conda config --remove-key default_channels >/dev/null 2>&1 || true
+  miniforge_conda config --remove-key custom_channels >/dev/null 2>&1 || true
+  miniforge_conda config --remove-key custom_multichannels >/dev/null 2>&1 || true
+
+  local alias="${CHANNEL_ALIAS_OVERRIDE:-https://conda.anaconda.org}"
+  alias="${alias%/}"
+  local safe_default="${alias}/conda-forge"
+  local condarc="${CONDARC:-$HOME/.condarc}"
+
+  backup_file "$condarc"
+
+  require_python
+  "$PYTHON_BIN" - "$condarc" "$safe_default" <<'PY'
+import pathlib, re, sys
+
+condarc = pathlib.Path(sys.argv[1]).expanduser()
+safe = sys.argv[2]
+text = ""
+if condarc.exists():
+    text = condarc.read_text(encoding="utf-8", errors="ignore")
+
+def strip_key_block(s, key):
+    # Remove both block-style and inline-style definitions.
+    block = re.compile(r"(?ms)^%s:\s*\n(?:^[ \t].*\n)*" % re.escape(key))
+    inline = re.compile(r"(?m)^%s:.*\n" % re.escape(key))
+    s = block.sub("", s)
+    s = inline.sub("", s)
+    return s
+
+for k in ("default_channels", "custom_channels", "custom_multichannels"):
+    text = strip_key_block(text, k)
+
+text = text.rstrip()
+if text:
+    text += "\n"
+
+safe_block = (
+    "default_channels:\n"
+    f"  - {safe}\n"
+    "custom_channels: {}\n"
+    "custom_multichannels:\n"
+    "  defaults:\n"
+    f"    - {safe}\n"
+)
+
+text += safe_block + "\n"
+condarc.parent.mkdir(parents=True, exist_ok=True)
+condarc.write_text(text, encoding="utf-8")
+PY
+
+  if [[ -n "${CHANNEL_ALIAS_OVERRIDE}" ]]; then
+    miniforge_conda config --set channel_alias "${CHANNEL_ALIAS_OVERRIDE}" >/dev/null 2>&1 || true
+  fi
 }
 
 enforce_conda_channels_compliance() {
@@ -408,18 +722,24 @@ enforce_conda_channels_compliance() {
   if [[ "$conda_bin" == "$MINIFORGE_DIR/bin/conda" ]]; then
     miniforge_conda config --remove channels defaults >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+    miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/free >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main >/dev/null 2>&1 || true
+    miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://conda.anaconda.org/pkgs/main >/dev/null 2>&1 || true
+    miniforge_conda config --remove channels https://conda.anaconda.org/pkgs/r >/dev/null 2>&1 || true
     miniforge_conda config --remove channels https://conda.anaconda.org/pkgs/free >/dev/null 2>&1 || true
   else
     "$conda_bin" config --remove channels defaults >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+    "$conda_bin" config --remove channels https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://repo.anaconda.com/pkgs/free >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main >/dev/null 2>&1 || true
+    "$conda_bin" config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://conda.anaconda.org/pkgs/main >/dev/null 2>&1 || true
+    "$conda_bin" config --remove channels https://conda.anaconda.org/pkgs/r >/dev/null 2>&1 || true
     "$conda_bin" config --remove channels https://conda.anaconda.org/pkgs/free >/dev/null 2>&1 || true
   fi
 
@@ -433,88 +753,24 @@ enforce_conda_channels_compliance() {
   fi
 }
 
-check_conda_channels_risk() {
-  local conda_bin="$1"
-  local label="$2"
-  [[ -x "$conda_bin" ]] || { warn "Risk check skipped: $label conda not found: $conda_bin"; return 0; }
-
-  log "Risk check ($label): channels + endpoints"
-  local cfg
-  if [[ "$conda_bin" == "$MINIFORGE_DIR/bin/conda" ]]; then
-    cfg="$(miniforge_conda config --show channels 2>/dev/null || true)"
-  elif [[ "$conda_bin" == "$MINICONDA_DIR/bin/conda" ]]; then
-    if miniconda_can_run_conda; then
-      cfg="$(miniconda_conda config --show channels 2>/dev/null || true)"
-    else
-      warn "Risk check skipped: $label conda not runnable under MINICONDA_DIR=$MINICONDA_DIR"
-      return 0
-    fi
-  else
-    cfg="$("$conda_bin" config --show channels 2>/dev/null || true)"
-  fi
-
-  local risky_found=0
-
-  # Print channel list with flags
-  echo "$cfg" | while IFS= read -r line; do
-    if is_risky_channel_line "$line"; then
-      echo "[RISK][$label] $line"
-      risky_found=1
-    else
-      echo "[ OK ][$label] $line"
-    fi
-  done
-
-  if echo "$cfg" | grep -Eiq '^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|pkgs/(main|free)|/anaconda/pkgs/(main|free)'; then
-    risky_found=1
-  fi
-
-  if [[ "$risky_found" == "1" ]]; then
-    warn "[$label] Potential commercial-risk sources detected in channel config."
-
-    # For Miniforge, enforce automatically (to guarantee compliance).
-    if [[ "$ENFORCE_COMPLIANCE" == "1" && "$conda_bin" == "$MINIFORGE_DIR/bin/conda" ]]; then
-      warn "[$label] Enforcing compliance now (conda-forge only, strict)..."
-      enforce_conda_channels_compliance "$conda_bin" || true
-
-      cfg="$(miniforge_conda config --show channels 2>/dev/null || true)"
-      if echo "$cfg" | grep -Eiq '^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|pkgs/(main|free)|/anaconda/pkgs/(main|free)|repo\.anaconda\.com|conda\.anaconda\.org'; then
-        die "[$label] Compliance enforcement failed; risky channels still present. Please inspect: $conda_bin config --show channels"
-      fi
-      log "[$label] ✅ Compliance enforced (channels cleaned)."
-      return 0
-    fi
-
-    warn "Remediation commands (keep only conda-forge + approved conda-forge mirror):"
-    warn "  $conda_bin config --set channel_priority strict"
-    warn "  $conda_bin config --remove channels defaults"
-    warn "  $conda_bin config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main"
-    warn "  $conda_bin config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free"
-    warn "  $conda_bin config --remove channels conda-forge || true"
-    warn "  $conda_bin config --add channels conda-forge"
-    return 0
-  fi
-
-  log "[$label] ✅ Looks clean (no defaults/pkgs/main/free/anaconda endpoints detected in channel config)"
-}
-
 scan_exported_yml_for_risky_channels() {
   local dir="$1"
   [[ -d "$dir" ]] || { warn "YML scan skipped: not found $dir"; return 0; }
 
-  log "Risk check: scanning exported env YAMLs under $dir"
+  log "Risk check: scanning env YAMLs under $dir"
   local hits
   hits="$(grep -RIn --include '*.yml' --include '*.yaml' -E \
-    '(^|[[:space:]])defaults::|(^|[[:space:]])anaconda::|^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|pkgs/(main|free)|repo\.anaconda\.com|conda\.anaconda\.org|/anaconda/pkgs/(main|free)' \
+    '(^|[[:space:]])defaults::|(^|[[:space:]])anaconda::|^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|pkgs/(main|r)|repo\.anaconda\.com/pkgs/(main|r)|/anaconda/pkgs/(main|r)' \
     "$dir" 2>/dev/null || true)"
 
   if [[ -n "$hits" ]]; then
-    warn "Found risky channel references in exported YAMLs:"
+    warn "Found risky channel references in YAMLs:"
     echo "$hits"
+    COMPLIANCE_WARN_FOUND=1
     warn "Note:"
-    warn "  - These are YAML backup exports; they reflect past config and may contain non-compliant channels."
-    warn "  - During migration, this script sanitizes each YAML before 'conda env create -f', so this does NOT affect env creation in this run."
-    warn "  - If you (or CI) later reuse these YAMLs directly, they could override your conda config. You can sanitize the exports now."
+    warn "  - These YAMLs may reflect past configs and contain non-compliant channels."
+    warn "  - During migration, this script sanitizes each YAML before 'conda env create -f'."
+    warn "  - If you (or CI) reuse these YAMLs directly, they could override your conda config."
 
     local do_sanitize=""
     case "${SANITIZE_EXPORTED_YMLS}" in
@@ -535,17 +791,17 @@ scan_exported_yml_for_risky_channels() {
         ;;
     esac
 
-	    if [[ "$do_sanitize" =~ ^[Yy]$ ]]; then
-	      log "Sanitizing exported YAML backups under: $dir"
-	      local files failed=0
-	      files="$(printf '%s\n' "$hits" | awk -F: '{print $1}' | sort -u)"
-	      while IFS= read -r yml; do
-	        [[ -n "$yml" ]] || continue
-	        if ! sanitize_yml_channels_inplace "$yml"; then
-	          warn "sanitize failed: $yml (backup should be under: $BACKUP_DIR)"
-	          failed=1
-	        fi
-	      done <<< "$files"
+    if [[ "$do_sanitize" =~ ^[Yy]$ ]]; then
+      log "Sanitizing YAMLs under: $dir"
+      local files failed=0
+      files="$(printf '%s\n' "$hits" | awk -F: '{print $1}' | sort -u)"
+      while IFS= read -r yml; do
+        [[ -n "$yml" ]] || continue
+        if ! sanitize_yml_channels_inplace "$yml"; then
+          warn "sanitize failed: $yml (backup should be under: $BACKUP_DIR)"
+          failed=1
+        fi
+      done <<< "$files"
       if [[ "$failed" == "1" ]]; then
         warn "Some exported YAMLs could not be fully sanitized; please inspect the warnings above."
       else
@@ -569,7 +825,8 @@ sanitize_yml_channels_inplace() {
   # Backup (centralized)
   backup_file "$yml"
 
-  python3 - "$yml" <<'PY'
+  require_python
+  "$PYTHON_BIN" - "$yml" <<'PY'
 import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding="utf-8", errors="ignore")
@@ -592,7 +849,7 @@ print("sanitized", p)
 PY
 
   # Sanity: ensure no risky channel tokens remain anywhere in the YAML
-  if grep -Eiq '(^|[[:space:]])defaults::|^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|/anaconda/pkgs/(main|free)|pkgs/(main|free)|repo\.anaconda\.com|conda\.anaconda\.org|(^|[[:space:]])anaconda::' "$yml"; then
+  if grep -Eiq '(^|[[:space:]])defaults::|^[[:space:]]*-[[:space:]]*defaults[[:space:]]*$|/anaconda/pkgs/(main|r)|pkgs/(main|r)|repo\.anaconda\.com/pkgs/(main|r)|(^|[[:space:]])anaconda::' "$yml"; then
     warn "sanitize: still found risky channel references in $yml"
     return 2
   fi
@@ -622,14 +879,22 @@ install_miniforge_if_needed() {
 configure_miniforge_channels() {
   miniforge_can_run_conda || die "conda not runnable under MINIFORGE_DIR=$MINIFORGE_DIR (broken/moved install?)"
 
+  if [[ "$ENFORCE_COMPLIANCE" != "1" ]]; then
+    warn "ENFORCE_COMPLIANCE=0: skipping channel enforcement; only setting auto_activate_base."
+    miniforge_conda config --set auto_activate_base "$AUTO_ACTIVATE_BASE" >/dev/null 2>&1 || true
+    return 0
+  fi
+
   # Enforce legal-safe defaults
   miniforge_conda config --set channel_priority strict >/dev/null
   miniforge_conda config --remove channels defaults >/dev/null 2>&1 || true
 
   # Remove common risky channels / mirrors (idempotent)
   miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/main >/dev/null 2>&1 || true
+  miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/r >/dev/null 2>&1 || true
   miniforge_conda config --remove channels https://repo.anaconda.com/pkgs/free >/dev/null 2>&1 || true
   miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main >/dev/null 2>&1 || true
+  miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/r >/dev/null 2>&1 || true
   miniforge_conda config --remove channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free >/dev/null 2>&1 || true
 
   # Ensure conda-forge exists & is on top
@@ -638,6 +903,11 @@ configure_miniforge_channels() {
 
   # Optional: avoid auto base activation
   miniforge_conda config --set auto_activate_base "$AUTO_ACTIVATE_BASE" >/dev/null 2>&1 || true
+
+  if [[ "$ENFORCE_DEEP_COMPLIANCE" == "1" ]]; then
+    deep_clean_miniforge_defaults_mappings || true
+    log "Miniforge deep compliance applied (default/custom channels mappings cleaned)"
+  fi
 
   log "Miniforge channels configured (conda-forge only, strict)"
 }
@@ -872,6 +1142,22 @@ remove_miniconda_safely() {
   fi
 }
 
+final_compliance_summary() {
+  if [[ "$COMPLIANCE_POST_HIGH_RISK" == "1" ]]; then
+    warn "Final compliance: HIGH-RISK (defaults or pkgs/main|pkgs/r endpoints still present)."
+    warn "Inspect: ${MINIFORGE_DIR}/bin/conda config --show | egrep -n 'defaults|pkgs/(main|r)|default_channels:|custom_channels:|custom_multichannels:'"
+    return 1
+  fi
+
+  if [[ "$COMPLIANCE_WARN_FOUND" == "1" ]]; then
+    warn "Final compliance: PASS with WARN (policy-dependent items present)."
+    return 0
+  fi
+
+  log "Final compliance: PASS (no defaults / no pkgs/main|pkgs/r endpoints)"
+  return 0
+}
+
 # ===== Main =====
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -933,6 +1219,14 @@ if [[ -z "${BACKUP_DIR:-}" ]]; then
   BACKUP_DIR="${MINICONDA_BACKUP_PARENT%/}/conda_migrate_backups/${BACKUP_TS}"
 fi
 
+if [[ "$AUTO_DETECT_CONDA_DIRS" == "1" ]] && ! miniforge_can_run_conda; then
+  detected_miniforge_dir="$(auto_detect_miniforge_dir || true)"
+  if [[ -n "${detected_miniforge_dir:-}" ]]; then
+    warn "MINIFORGE_DIR not found; auto-detected: $detected_miniforge_dir"
+    MINIFORGE_DIR="$detected_miniforge_dir"
+  fi
+fi
+
 if [[ "$AUTO_DETECT_CONDA_DIRS" == "1" ]] && ! miniconda_can_run_conda; then
   detected_miniconda_dir="$(auto_detect_miniconda_dir || true)"
   if [[ -n "${detected_miniconda_dir:-}" ]]; then
@@ -949,12 +1243,18 @@ log "BACKUP_DIR=$BACKUP_DIR"
 
 preflight_disk_space_checks
 
-# Risk check existing installs (informational)
+check_user_count
+
+if [[ "$CHECK_PATH_CONDA" == "1" ]]; then
+  check_conda_compliance "PATH" "current(PATH)" "pre"
+fi
+
+# Compliance check existing installs (informational)
 if [[ -d "$MINICONDA_DIR" ]]; then
   if miniconda_can_run_conda; then
-    check_conda_channels_risk "$MINICONDA_DIR/bin/conda" "miniconda(pre)"
+    check_conda_compliance "$MINICONDA_DIR/bin/conda" "miniconda(pre)" "pre"
   else
-    warn "Miniconda detected at $MINICONDA_DIR but conda is not runnable; skipping channel risk check."
+    warn "Miniconda detected at $MINICONDA_DIR but conda is not runnable; skipping compliance check."
   fi
 else
   warn "Miniconda not found at $MINICONDA_DIR (ok if already removed)"
@@ -972,19 +1272,32 @@ else
 fi
 
 install_miniforge_if_needed
-log "Enforcing Miniforge strict channel policy (conda-forge only, strict)..."
+log "Configuring Miniforge (channel policy + auto_activate_base)..."
 configure_miniforge_channels
 
-# Risk check miniforge after enforcing channels
-check_conda_channels_risk "$MINIFORGE_DIR/bin/conda" "miniforge(post-config)"
+# Compliance check miniforge after enforcing channels
+check_conda_compliance "$MINIFORGE_DIR/bin/conda" "miniforge(post)" "post"
+if [[ "$COMPLIANCE_POST_HIGH_RISK" == "1" && "$ENFORCE_COMPLIANCE" == "1" ]]; then
+  die "Compliance enforcement failed; defaults or pkgs/main|pkgs/r still present in Miniforge config."
+fi
 
 init_shells_idempotent
 migrate_envs_scheme_a
 
 # Scan exported yml for risky channels
 scan_exported_yml_for_risky_channels "$EXPORT_DIR"
+if [[ -n "${SCAN_YML_DIR:-}" && "$SCAN_YML_DIR" != "$EXPORT_DIR" ]]; then
+  scan_exported_yml_for_risky_channels "$SCAN_YML_DIR"
+fi
 
 remove_miniconda_safely
+
+if ! final_compliance_summary; then
+  if [[ "$STRICT_EXIT" == "1" ]]; then
+    warn "STRICT_EXIT=1: exiting with non-zero due to post-migration compliance risk."
+    exit 2
+  fi
+fi
 
 cat <<EOF
 

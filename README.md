@@ -1,137 +1,90 @@
 # Miniconda3 → Miniforge3 Migration Script
 
-A **safe, idempotent, and compliance-friendly** migration script to move from **Miniconda / Anaconda** to **Miniforge3**, with a single command.
-
-This script helps you:
-
-* Migrate existing Conda environments
-* Switch to **conda-forge–only** (recommended for legal/commercial safety)
-* Clean old shell init blocks
-* Install and initialize Miniforge automatically
-* Optionally back up or remove Miniconda safely
+A safe, idempotent migration from **Miniconda/Anaconda (defaults)** to **Miniforge (conda-forge)**.
+This project provides technical tooling and documentation, **not legal advice**.
 
 ---
 
-## 🚀 One-Line Usage
+## Quick Start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/luoluoter/miniconda3-to-miniforge3/main/migrate_to_miniforge.sh | bash
 ```
 
-That’s it.
-The script is designed to be **safe to re-run** and **non-destructive by default**.
+The script is **safe to re-run** and **non-destructive by default**.
 
 ---
 
-## ✨ Why Miniforge?
+## What the Script Does
 
-* **Miniconda / Anaconda** may pull packages from `defaults` / `pkgs/main`, which can introduce **commercial licensing risks**
-* **Miniforge** is community-driven and ships with **conda-forge only**
-* Better alignment with **open-source, CI, enterprise, and redistribution** use cases
-
-This script enforces a **strict conda-forge-only policy** by default.
-
----
-
-## 🧠 What This Script Does
-
-### 1. Detects Existing Conda Installs
-
-* Automatically finds Miniconda / Anaconda if present
-* Works even if `conda` binaries were moved or partially broken
-
-### 2. Installs Miniforge3 (If Needed)
-
-* Downloads the official Miniforge installer
-* Supports:
-
-  * Linux (x86_64 / aarch64)
-  * macOS (Intel / Apple Silicon)
-
-### 3. Enforces Channel Compliance
-
-* Removes:
-
-  * `defaults`
-  * `pkgs/main`, `pkgs/free`
-  * `repo.anaconda.com`
-* Keeps:
-
-  * `conda-forge`
-* Enables:
-
-  * `channel_priority: strict`
-
-### 4. Migrates Conda Environments (Safe Scheme)
-
-* Exports each environment from Miniconda (`conda env export`)
-* **Sanitizes YAML files** to remove risky channels
-* Recreates environments in Miniforge
-* Skips environments that already exist (idempotent)
-
-### 5. Cleans Shell Configuration
-
-Removes old `conda init` blocks from:
-
-* `.bashrc`
-* `.bash_profile`
-* `.profile`
-* `.zshrc`
-* `fish/config.fish`
-
-Then re-initializes Conda using **Miniforge**.
-
-### 6. Safe Miniconda Removal (Optional)
-
-* Verifies all environments were migrated
-* Moves Miniconda to a timestamped backup directory
-* Never deletes without confirmation (unless explicitly configured)
+- Detects existing Miniconda/Anaconda
+- Installs Miniforge if missing
+- Enforces **conda-forge-only** channels (strict priority)
+- Deep-cleans hidden defaults mappings (default/custom channels)
+- Exports & recreates environments (YAMLs are sanitized)
+- Cleans shell init blocks and re-initializes with Miniforge
+- Optionally backs up / moves Miniconda after verification
 
 ---
 
-## 📂 Backups & Safety
+## Why Migrate (Short Version)
 
-This script **never blindly deletes data**.
-
-It creates backups for:
-
-* Shell RC files
-* Exported environment YAMLs
-* Miniconda directory (moved, not deleted)
-
-Default backup location:
-
-```
-~/conda_migrate_backups/<timestamp>/
-```
-
-You can safely review and delete backups later.
+- Miniconda defaults to Anaconda’s `defaults` channel.
+- Using `defaults` in orgs **>200 people** may trigger commercial terms (per Anaconda policies).
+- Miniforge is community-maintained and defaults to **conda-forge**.
 
 ---
 
-## ⚙️ Configuration (Optional)
+## Compliance Boundaries (Summary)
 
-You can customize behavior using environment variables:
+- Does **not** bypass licensing, modify Anaconda software, or redistribute proprietary assets.
+- Only replaces distributions/channels and updates configs.
+- See `docs/COMPLIANCE.md` and `docs/REFERENCES.md` for details.
+
+---
+
+## Safety & Idempotence
+
+- Safe to re-run; already-migrated envs are skipped.
+- Backups are kept under: `~/conda_migrate_backups/<timestamp>/`.
+
+---
+
+## Configuration (Common Options)
 
 ```bash
 REMOVE_MINICONDA=0 \
-AUTO_ACTIVATE_BASE=false \
+ENFORCE_COMPLIANCE=1 \
+STRICT_EXIT=0 \
 bash migrate_to_miniforge.sh
 ```
 
-### Common Options
+## Advanced Usage (Concise)
 
-| Variable                  | Description                       |
-| ------------------------- | --------------------------------- |
-| `MINICONDA_DIR`           | Path to existing Miniconda        |
-| `MINIFORGE_DIR`           | Target Miniforge install path     |
-| `DO_MIGRATE_ENVS`         | `1` = migrate envs (default)      |
-| `CLEAN_RC`                | `1` = clean old shell init blocks |
-| `REMOVE_MINICONDA`        | `1` = move Miniconda to backup    |
-| `MINICONDA_DELETE_BACKUP` | `1` = auto delete backup          |
-| `ENFORCE_COMPLIANCE`      | `1` = force conda-forge only      |
+Specify install + backup dirs:
 
-Run with `--help` for full details:
+```bash
+bash migrate_to_miniforge.sh -p /data/miniforge3 -B /data/conda_backups
+```
+
+Specify Miniconda + backup parent:
+
+```bash
+bash migrate_to_miniforge.sh -m /opt/miniconda3 -b /data
+```
+
+Key variables:
+
+- `MINICONDA_DIR`, `MINIFORGE_DIR`
+- `REMOVE_MINICONDA` (1 moves to backup, 0 keeps)
+- `ENFORCE_COMPLIANCE` (1 enforce conda-forge-only)
+- `ENFORCE_DEEP_COMPLIANCE` (1 clean default/custom channel mappings)
+- `ALLOW_ANACONDA_ORG` (0 warn on conda.anaconda.org)
+- `CHANNEL_ALIAS_OVERRIDE` (set mirror if anaconda.org is forbidden)
+- `STRICT_EXIT` (1 exit non-zero if post-migration still risky)
+- `SANITIZE_EXPORTED_YMLS` (1 auto-sanitize YAML exports)
+
+Full list:
 
 ```bash
 bash migrate_to_miniforge.sh --help
@@ -139,9 +92,7 @@ bash migrate_to_miniforge.sh --help
 
 ---
 
-## ✅ Expected Result
-
-After completion:
+## Verify After Migration
 
 ```bash
 which conda
@@ -150,43 +101,22 @@ conda config --show channels
 conda env list
 ```
 
-You should see:
+Expected:
 
-* Base environment → **Miniforge**
-* Channels → **conda-forge only**
-* Environments recreated under:
-
-  ```
-  <miniforge>/envs/
-  ```
+- Base environment points to Miniforge
+- Channels are **conda-forge only** (or your approved mirror)
 
 ---
 
-## 🔁 Idempotent by Design
+## Docs
 
-You can safely:
-
-* Re-run the script
-* Resume after partial failures
-* Fix individual environment YAMLs and retry
-
-Already-migrated environments are skipped automatically.
+- `docs/ANALYZE_zh.md` (background & risk analysis)
+- `docs/COMPLIANCE.md` (compliance boundaries)
+- `docs/REFERENCES.md` (public references)
+- `docs/DESIGN.md` (design & workflow)
 
 ---
 
-## 📜 License
+## License
 
 MIT License
-Free to use, modify, and distribute.
-
----
-
-## 🙌 Motivation
-
-This project exists to help developers:
-
-* Avoid accidental license exposure
-* Migrate safely without breaking environments
-* Adopt a cleaner, community-driven Conda ecosystem
-
-If this helped you, feel free to ⭐ the repo or open an issue.
