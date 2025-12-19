@@ -35,6 +35,29 @@ The script is **safe to re-run** and **non-destructive by default**.
 - Using `defaults` in orgs **>200 people** may trigger commercial terms (per Anaconda policies).
 - Miniforge is community-maintained and defaults to **conda-forge**.
 
+## Recommended Migration (Production)
+
+1) Export from Miniconda:
+
+```bash
+conda activate old_env
+conda env export > env.yaml
+```
+
+2) Edit `env.yaml`:
+
+- Keep only `conda-forge` under `channels`
+- Remove `defaults`
+- Remove `prefix:` line
+
+3) Recreate in Miniforge:
+
+```bash
+conda env create -f env.yaml
+```
+
+This script follows the same flow automatically (export -> sanitize channels + remove prefix -> recreate).
+
 ---
 
 ## Compliance Boundaries (Summary)

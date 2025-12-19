@@ -831,8 +831,10 @@ import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding="utf-8", errors="ignore")
 
-# Remove existing top-level channels block (channels: + list items)
-s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+  # Remove existing top-level channels block (channels: + list items)
+  s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+  # Remove top-level prefix to avoid recreating env at old Miniconda path
+  s2 = re.sub(r"(?m)^prefix:\s*.*\n", "", s2)
 
 clean = "channels:\n  - conda-forge\n"
 
@@ -999,7 +1001,7 @@ create_env_from_yml_safe() {
   # 2) create env (keep full output in a persistent log)
   local create_log="$log_dir/create_${envname}.log"
   log "conda env create log: $create_log"
-  if miniforge_conda env create -f "$yml" 2>&1 | tee "$create_log"; then
+  if miniforge_conda env create -f "$yml" -c conda-forge 2>&1 | tee "$create_log"; then
     return 0
   fi
 

@@ -35,6 +35,29 @@ curl -fsSL https://raw.githubusercontent.com/luoluoter/miniconda3-to-miniforge3/
 - 在组织规模 **>200** 的商业/企业场景中，可能触发 Anaconda 商业条款。
 - Miniforge 由社区维护，默认仅使用 **conda-forge**。
 
+## 推荐迁移方式（工程级）
+
+1) 在 Miniconda 中导出：
+
+```bash
+conda activate old_env
+conda env export > env.yaml
+```
+
+2) 编辑 `env.yaml`：
+
+- `channels` 只保留 `conda-forge`
+- 删除 `defaults`
+- 删除 `prefix:` 行
+
+3) 在 Miniforge 中重建：
+
+```bash
+conda env create -f env.yaml
+```
+
+本脚本自动执行相同流程（导出 -> 清洗 channels + 删除 prefix -> 重建）。
+
 ---
 
 ## 合规边界（摘要）
