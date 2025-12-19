@@ -1,11 +1,13 @@
 # Miniconda3 → Miniforge3 Migration Script
 
+English | [中文说明](README_zh.md)
+
 A safe, idempotent migration from **Miniconda/Anaconda (defaults)** to **Miniforge (conda-forge)**.
 This project provides technical tooling and documentation, **not legal advice**.
 
 ---
 
-## Quick Start
+## All You Need
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/luoluoter/miniconda3-to-miniforge3/main/migrate_to_miniforge.sh | bash
@@ -72,6 +74,18 @@ Specify Miniconda + backup parent:
 ```bash
 bash migrate_to_miniforge.sh -m /opt/miniconda3 -b /data
 ```
+
+## Compliance Check Only
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luoluoter/miniconda3-to-miniforge3/main/conda_compliance_check.sh | bash
+```
+
+Notes:
+
+- If Miniconda was already removed, its missing path is reported as OK.
+- You can override paths: `MINIFORGE_CONDA=/path/to/conda MINICONDA_CONDA=/path/to/conda`.
+- Optional scan: `SCAN_YML_DIR=/path/to/exports`.
 
 Key variables:
 

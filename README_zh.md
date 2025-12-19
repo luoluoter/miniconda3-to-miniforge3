@@ -1,5 +1,7 @@
 # Miniconda3 → Miniforge3 迁移脚本
 
+[English](README.md) | 中文
+
 一个 **安全、幂等** 的迁移脚本，用于将 **Miniconda/Anaconda（defaults）** 迁移到 **Miniforge（conda-forge）**。
 本项目提供的是技术工具与文档，**不构成法律意见**。
 
@@ -72,6 +74,18 @@ bash migrate_to_miniforge.sh -p /data/miniforge3 -B /data/conda_backups
 ```bash
 bash migrate_to_miniforge.sh -m /opt/miniconda3 -b /data
 ```
+
+## 仅做合规检查
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luoluoter/miniconda3-to-miniforge3/main/conda_compliance_check.sh | bash
+```
+
+说明：
+
+- 如果 Miniconda 已移除，路径不存在会显示为 OK。
+- 可覆盖路径：`MINIFORGE_CONDA=/path/to/conda MINICONDA_CONDA=/path/to/conda`。
+- 可选扫描：`SCAN_YML_DIR=/path/to/exports`。
 
 常用变量：
 

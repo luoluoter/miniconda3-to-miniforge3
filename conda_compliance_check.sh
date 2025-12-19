@@ -86,11 +86,19 @@ check_conda() {
   conda_bin="$(resolve_conda_bin "$input_bin")"
 
   if [[ -z "$conda_bin" ]]; then
-    warn "($label) conda not found"
+    if [[ "$input_bin" == "$MINICONDA_CONDA" ]]; then
+      ok "($label) Miniconda not found (expected if already migrated/removed)."
+    else
+      warn "($label) conda not found"
+    fi
     return 0
   fi
   if [[ ! -x "$conda_bin" ]]; then
-    warn "($label) conda not executable: $conda_bin"
+    if [[ "$input_bin" == "$MINICONDA_CONDA" ]]; then
+      ok "($label) Miniconda not executable (expected if already migrated/removed): $conda_bin"
+    else
+      warn "($label) conda not executable: $conda_bin"
+    fi
     return 0
   fi
 

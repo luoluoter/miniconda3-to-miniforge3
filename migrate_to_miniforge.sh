@@ -1305,6 +1305,8 @@ cat <<EOF
 
 Next steps:
   - Restart your terminal (recommended)
+  - If 'conda' still points to old paths, run: hash -r
+    (or open a new login shell: exec "$SHELL" -l)
   - Verify:
       which conda
       conda info | grep "base environment"
@@ -1318,7 +1320,7 @@ Expected:
 
 Backups created by this script (rc/yml/etc) are centralized here:
   - $BACKUP_DIR
-After confirming everything works, you can review and delete that directory if desired.
+After confirming conda works and envs are OK, you can review and delete that directory if desired.
 
 If using fish: open a new fish session (or run: exec fish).
 
