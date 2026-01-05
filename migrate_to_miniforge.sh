@@ -25,6 +25,7 @@ AUTO_ACTIVATE_BASE="${AUTO_ACTIVATE_BASE:-false}"
 MIGRATE_MODE="${MIGRATE_MODE:-all}"              # all|selected
 MIGRATE_ENVS="${MIGRATE_ENVS:-}"                 # comma/space list when MIGRATE_MODE=selected
 CLEANUP_FAILED_ENVS="${CLEANUP_FAILED_ENVS:-0}"  # 1 remove failed envs, 0 keep
+DEBUG="${DEBUG:-0}"                              # 1 enable extra debug logs
 
 # Optional safe removal
 REMOVE_MINICONDA="${REMOVE_MINICONDA:-1}"        # 1 move miniconda away after verification, 0 keep
@@ -95,6 +96,7 @@ SANITIZE_EXPORTED_YMLS="${SANITIZE_EXPORTED_YMLS:-}"
 log()  { echo -e "\033[1;32m[+]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[!]\033[0m $*"; }
 die()  { echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
+debug() { [[ "$DEBUG" == "1" ]] && echo -e "\033[1;34m[dbg]\033[0m $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -345,6 +347,7 @@ Key environment variables (defaults shown):
   MIGRATE_MODE=$MIGRATE_MODE                # all or selected
   MIGRATE_ENVS=${MIGRATE_ENVS:-"<unset>"}   # comma/space list when MIGRATE_MODE=selected
   CLEANUP_FAILED_ENVS=$CLEANUP_FAILED_ENVS  # 1 remove failed envs, 0 keep
+  DEBUG=$DEBUG                              # 1 enable extra debug logs
   CLEAN_RC=$CLEAN_RC                        # 1 clean conda init blocks, 0 skip
   AUTO_ACTIVATE_BASE=$AUTO_ACTIVATE_BASE    # true/false for Miniforge
 
@@ -840,10 +843,10 @@ import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding="utf-8", errors="ignore")
 
-  # Remove existing top-level channels block (channels: + list items)
-  s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
-  # Remove top-level prefix to avoid recreating env at old Miniconda path
-  s2 = re.sub(r"(?m)^prefix:\s*.*\n", "", s2)
+# Remove existing top-level channels block (channels: + list items)
+s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+# Remove top-level prefix to avoid recreating env at old Miniconda path
+s2 = re.sub(r"(?m)^prefix:\s*.*\n", "", s2)
 
 clean = "channels:\n  - conda-forge\n"
 
@@ -945,7 +948,7 @@ should_init_fish() {
   local sh; sh="$(user_shell_basename)"
   [[ "$sh" == "fish" ]] && return 0
   [[ -f "$FISH_CONF" || -d "$FISH_CONF_DIR" ]] && return 0
-  return 0
+  return 1
 }
 
 init_shells_idempotent() {
@@ -1019,6 +1022,30 @@ ensure_miniforge_channels_strict() {
   miniforge_conda config --add channels conda-forge >/dev/null 2>&1 || true
 }
 
+debug_show_yml_summary() {
+  local yml="$1"
+  [[ -f "$yml" ]] || { debug "YML not found: $yml"; return 0; }
+  local size_kb dep_count has_deps has_name has_channels
+  size_kb="$(du -k "$yml" 2>/dev/null | awk '{print $1}')"
+  has_name="$(grep -Eiq '^name:' "$yml" && echo 1 || echo 0)"
+  has_channels="$(grep -Eiq '^channels:' "$yml" && echo 1 || echo 0)"
+  has_deps="$(grep -Eiq '^dependencies:' "$yml" && echo 1 || echo 0)"
+  dep_count="$(awk '
+    BEGIN{p=0;c=0}
+    /^dependencies:/ {p=1; next}
+    p==1 && /^[^[:space:]].*:/ {p=0}
+    p==1 && /^[[:space:]]*-[[:space:]]*/ {c++}
+    END{print c}
+  ' "$yml")"
+  debug "YML summary: $yml (size=${size_kb:-?}KB name=$has_name channels=$has_channels dependencies=$has_deps dep_items=$dep_count)"
+  debug "YML head (first 30 lines):"
+  debug "-----"
+  if [[ "$DEBUG" == "1" ]]; then
+    sed -n '1,30p' "$yml"
+  fi
+  debug "-----"
+}
+
 export_env_yml_from_old_root() {
   local envname="$1"
   local yml="$2"
@@ -1027,6 +1054,7 @@ export_env_yml_from_old_root() {
     warn "[$envname] env export failed (old root: $MINICONDA_DIR)."
     return 1
   fi
+  debug_show_yml_summary "$yml"
   echo "$yml"
 }
 
@@ -1034,6 +1062,7 @@ export_env_yml() {
   local envname="$1"
   local yml="$EXPORT_DIR/${envname}.environment.yml"
   export_env_yml_from_old_root "$envname" "$yml"
+  log "Exported YAML: $yml" >&2
 }
 
 yml_has_dependency() {
@@ -1046,10 +1075,12 @@ verify_env_runnable() {
   local envname="$1"
   local yml="${2:-}"
   local out=""
+  local rc=0
 
-  if ! out="$(miniforge_conda run -n "$envname" python -V 2>&1)"; then
+  out="$(miniforge_conda run -n "$envname" python -V 2>&1)" || rc=$?
+  if [[ "$rc" != "0" ]]; then
     warn "[$envname] python -V failed: $out"
-    if echo "$out" | grep -Eiq 'python: command not found|No such file|not found'; then
+    if [[ "$rc" == "127" ]] || echo "$out" | grep -Eiq 'python: command not found|No such file|not found|execute\\(127\\)'; then
       return 2
     fi
     return 1
@@ -1113,11 +1144,12 @@ recreate_env_in_miniforge() {
     warn "[$envname] YAML sanitize failed or left risky refs. Check: $yml"
     return 10
   fi
+  debug_show_yml_summary "$yml"
 
   local create_log="$log_dir/create_${envname}.log"
   log "Creating in Miniforge: $envname"
   log "conda env create log: $create_log"
-  if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge 2>&1 | tee "$create_log"; then
+  if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee "$create_log"; then
     local rc="${PIPESTATUS[0]}"
     warn "[$envname] conda env create failed (exit $rc)."
     warn "  yml: $yml"
@@ -1149,7 +1181,7 @@ recreate_env_in_miniforge() {
 
   warn "[$envname] verification failed; removing and recreating once."
   remove_miniforge_env "$envname"
-  if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge 2>&1 | tee "$create_log"; then
+  if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee "$create_log"; then
     warn "[$envname] recreate failed; see log: $create_log"
     if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
       warn "Removing failed env: $envname"
@@ -1223,6 +1255,11 @@ verify_all_envs_migrated() {
     if ! miniforge_has_env "$envname"; then
       warn "Not migrated yet (missing in Miniforge): $envname"
       missing=1
+      continue
+    fi
+    if ! verify_env_runnable "$envname"; then
+      warn "Not migrated yet (not runnable in Miniforge): $envname"
+      missing=1
     fi
   done <<< "$envs"
   return $missing
@@ -1265,6 +1302,7 @@ remove_miniconda_safely() {
   fi
 
   local backup_dir="${MINICONDA_BACKUP_PARENT}/miniconda3_backup_${BACKUP_TS}"
+  mkdir -p "$MINICONDA_BACKUP_PARENT"
   log "All envs verified. Moving Miniconda to backup: $backup_dir"
   mv "$MINICONDA_DIR" "$backup_dir"
 

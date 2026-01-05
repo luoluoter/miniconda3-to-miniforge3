@@ -132,12 +132,13 @@ conda config --set channel_priority strict
 ### 5.1 重建
 
 ```bash
-~/miniforge3/bin/conda env create -f <OLD_ENV>.yml -c conda-forge
+~/miniforge3/bin/conda env create -f <OLD_ENV>.yml
 ```
 
 说明：
 
-* `-c conda-forge` 是双保险：即使 YAML/condarc 出现偏差，也尽量优先走 conda-forge。
+* 依赖 YAML 已清洗 + `.condarc` 仅保留 conda-forge。
+* 如果你的 conda 版本支持 `env create` 的 channel 参数，再加 `-c conda-forge` 作为双保险。
 
 ### 5.2 激活新环境
 
