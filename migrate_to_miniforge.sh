@@ -843,8 +843,10 @@ import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding="utf-8", errors="ignore")
 
-# Remove existing top-level channels block (channels: + list items)
-s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+  # Remove existing top-level channels (block or inline forms).
+  s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+  s2 = re.sub(r"(?m)^channels:\s*\[[^\]]*\]\s*\n", "", s2)
+  s2 = re.sub(r"(?m)^channels:\s*[^ \n].*\n", "", s2)
 # Remove top-level prefix to avoid recreating env at old Miniconda path
 s2 = re.sub(r"(?m)^prefix:\s*.*\n", "", s2)
 
@@ -1149,7 +1151,7 @@ recreate_env_in_miniforge() {
   local create_log="$log_dir/create_${envname}.log"
   log "Creating in Miniforge: $envname"
   log "conda env create log: $create_log"
-  if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee "$create_log"; then
+  if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge --override-channels 2>&1 | tee "$create_log"; then
     local rc="${PIPESTATUS[0]}"
     warn "[$envname] conda env create failed (exit $rc)."
     warn "  yml: $yml"
@@ -1181,7 +1183,7 @@ recreate_env_in_miniforge() {
 
   warn "[$envname] verification failed; removing and recreating once."
   remove_miniforge_env "$envname"
-  if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee "$create_log"; then
+  if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge --override-channels 2>&1 | tee "$create_log"; then
     warn "[$envname] recreate failed; see log: $create_log"
     if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
       warn "Removing failed env: $envname"
