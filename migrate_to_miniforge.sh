@@ -100,6 +100,9 @@ debug() { [[ "$DEBUG" == "1" ]] && echo -e "\033[1;34m[dbg]\033[0m $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 PYTHON_BIN="${PYTHON_BIN:-}"
+FAILED_ENVS=""
+REMOVE_MINICONDA_SKIPPED=0
+REMOVE_MINICONDA_SKIP_REASON=""
 
 resolve_python_bin() {
   if [[ -n "${PYTHON_BIN:-}" ]]; then
@@ -843,10 +846,10 @@ import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
 s = p.read_text(encoding="utf-8", errors="ignore")
 
-  # Remove existing top-level channels (block or inline forms).
-  s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
-  s2 = re.sub(r"(?m)^channels:\s*\[[^\]]*\]\s*\n", "", s2)
-  s2 = re.sub(r"(?m)^channels:\s*[^ \n].*\n", "", s2)
+# Remove existing top-level channels (block or inline forms).
+s2 = re.sub(r"(?ms)^channels:\s*\n(?:\s*-\s*.*\n)+", "", s)
+s2 = re.sub(r"(?m)^channels:\s*\[[^\]]*\]\s*\n", "", s2)
+s2 = re.sub(r"(?m)^channels:\s*[^ \n].*\n", "", s2)
 # Remove top-level prefix to avoid recreating env at old Miniconda path
 s2 = re.sub(r"(?m)^prefix:\s*.*\n", "", s2)
 
@@ -855,10 +858,10 @@ clean = "channels:\n  - conda-forge\n"
 # Keep common ordering: name first (if present), then channels
 m = re.search(r"(?m)^name:\s*.*\n", s2)
 if m:
-  i = m.end()
-  out = s2[:i] + clean + "\n" + s2[i:].lstrip()
+    i = m.end()
+    out = s2[:i] + clean + "\n" + s2[i:].lstrip()
 else:
-  out = clean + "\n" + s2.lstrip()
+    out = clean + "\n" + s2.lstrip()
 
 p.write_text(out, encoding="utf-8")
 print("sanitized", p)
@@ -1153,17 +1156,34 @@ recreate_env_in_miniforge() {
   log "conda env create log: $create_log"
   if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge --override-channels 2>&1 | tee "$create_log"; then
     local rc="${PIPESTATUS[0]}"
-    warn "[$envname] conda env create failed (exit $rc)."
-    warn "  yml: $yml"
-    warn "  log: $create_log"
-    warn "  Tip: pinned versions/builds may not exist on conda-forge; relax pins or resolve conflicts."
-    warn "  Last 80 log lines:"
-    tail -n 80 "$create_log" || true
-    if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
-      warn "Removing failed env: $envname"
-      remove_miniforge_env "$envname"
+    if grep -q "unrecognized arguments: -c conda-forge --override-channels" "$create_log"; then
+      warn "[$envname] conda env create does not support --override-channels; retrying without channel override."
+      if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee -a "$create_log"; then
+        warn "[$envname] conda env create failed after retry."
+        warn "  yml: $yml"
+        warn "  log: $create_log"
+        warn "  Tip: pinned versions/builds may not exist on conda-forge; relax pins or resolve conflicts."
+        warn "  Last 80 log lines:"
+        tail -n 80 "$create_log" || true
+        if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
+          warn "Removing failed env: $envname"
+          remove_miniforge_env "$envname"
+        fi
+        return 20
+      fi
+    else
+      warn "[$envname] conda env create failed (exit $rc)."
+      warn "  yml: $yml"
+      warn "  log: $create_log"
+      warn "  Tip: pinned versions/builds may not exist on conda-forge; relax pins or resolve conflicts."
+      warn "  Last 80 log lines:"
+      tail -n 80 "$create_log" || true
+      if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
+        warn "Removing failed env: $envname"
+        remove_miniforge_env "$envname"
+      fi
+      return 20
     fi
-    return 20
   fi
 
   log "Verifying: $envname"
@@ -1184,12 +1204,24 @@ recreate_env_in_miniforge() {
   warn "[$envname] verification failed; removing and recreating once."
   remove_miniforge_env "$envname"
   if ! miniforge_conda env create -f "$yml" -n "$envname" -c conda-forge --override-channels 2>&1 | tee "$create_log"; then
-    warn "[$envname] recreate failed; see log: $create_log"
-    if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
-      warn "Removing failed env: $envname"
-      remove_miniforge_env "$envname"
+    if grep -q "unrecognized arguments: -c conda-forge --override-channels" "$create_log"; then
+      warn "[$envname] conda env create does not support --override-channels; retrying without channel override."
+      if ! miniforge_conda env create -f "$yml" -n "$envname" 2>&1 | tee -a "$create_log"; then
+        warn "[$envname] recreate failed; see log: $create_log"
+        if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
+          warn "Removing failed env: $envname"
+          remove_miniforge_env "$envname"
+        fi
+        return 30
+      fi
+    else
+      warn "[$envname] recreate failed; see log: $create_log"
+      if [[ "$CLEANUP_FAILED_ENVS" == "1" ]]; then
+        warn "Removing failed env: $envname"
+        remove_miniforge_env "$envname"
+      fi
+      return 30
     fi
-    return 30
   fi
 
   if verify_env_runnable "$envname" "$yml"; then
@@ -1240,7 +1272,8 @@ migrate_envs_scheme_a() {
     if recreate_env_in_miniforge "$yml" "$envname"; then
       log "OK: $envname"
     else
-      warn "Failed: $envname (yml kept: $yml). Fix pins/packages then re-run script."
+      warn "Failed: $envname (yml kept: $yml). Manual rebuild may be required."
+      FAILED_ENVS="${FAILED_ENVS}${FAILED_ENVS:+, }$envname"
     fi
   done <<< "$envs"
 
@@ -1268,9 +1301,19 @@ verify_all_envs_migrated() {
 }
 
 remove_miniconda_safely() {
-  [[ "$REMOVE_MINICONDA" == "1" ]] || { log "REMOVE_MINICONDA=0, keep Miniconda"; return; }
+  if [[ "$REMOVE_MINICONDA" != "1" ]]; then
+    log "REMOVE_MINICONDA=0, keep Miniconda"
+    REMOVE_MINICONDA_SKIPPED=1
+    REMOVE_MINICONDA_SKIP_REASON="REMOVE_MINICONDA=0"
+    return
+  fi
 
-  [[ -n "$MINICONDA_DIR" && -d "$MINICONDA_DIR" ]] || { warn "Miniconda dir not found, skip removal"; return; }
+  if [[ -z "$MINICONDA_DIR" || ! -d "$MINICONDA_DIR" ]]; then
+    warn "Miniconda dir not found, skip removal"
+    REMOVE_MINICONDA_SKIPPED=1
+    REMOVE_MINICONDA_SKIP_REASON="Miniconda dir not found"
+    return
+  fi
   [[ "$MINICONDA_DIR" != "$MINIFORGE_DIR" ]] || die "Safety stop: MINICONDA_DIR equals MINIFORGE_DIR"
   [[ "$MINICONDA_DIR" != "/" && "$MINICONDA_DIR" != "$HOME" ]] || die "Safety stop: dangerous MINICONDA_DIR=$MINICONDA_DIR"
 
@@ -1283,23 +1326,35 @@ remove_miniconda_safely() {
       1) proceed="y" ;;
       0) proceed="n" ;;
       "")
-        if [[ -t 0 ]]; then
-          read -r -p "Proceed to move/remove Miniconda anyway (without verification)? [y/N]: " proceed
-        else
-          die "Non-interactive shell: refusing to remove broken Miniconda without verification. Set FORCE_REMOVE_MINICONDA_BROKEN=1 to override."
-        fi
-        ;;
+      if [[ -t 0 ]]; then
+        read -r -p "Proceed to move/remove Miniconda anyway (without verification)? [y/N]: " proceed
+      else
+        warn "Non-interactive shell: refusing to remove broken Miniconda without verification."
+        warn "Set FORCE_REMOVE_MINICONDA_BROKEN=1 to override."
+        REMOVE_MINICONDA_SKIPPED=1
+        REMOVE_MINICONDA_SKIP_REASON="Miniconda broken; FORCE_REMOVE_MINICONDA_BROKEN not set"
+        return 0
+      fi
+      ;;
       *)
         warn "Invalid FORCE_REMOVE_MINICONDA_BROKEN=${FORCE_REMOVE_MINICONDA_BROKEN} (use 1/0 or unset); aborting removal."
         proceed="n"
         ;;
     esac
 
-    [[ "$proceed" =~ ^[Yy]$ ]] || die "Abort removal due to non-runnable Miniconda. Fix MINICONDA_DIR or set FORCE_REMOVE_MINICONDA_BROKEN=1."
+    if [[ ! "$proceed" =~ ^[Yy]$ ]]; then
+      warn "Skip removal due to non-runnable Miniconda. Fix MINICONDA_DIR or set FORCE_REMOVE_MINICONDA_BROKEN=1."
+      REMOVE_MINICONDA_SKIPPED=1
+      REMOVE_MINICONDA_SKIP_REASON="Miniconda broken; user declined removal"
+      return 0
+    fi
   else
     log "Verifying all envs migrated before removing Miniconda..."
     if ! verify_all_envs_migrated; then
-      die "Abort removal: some envs are not present in Miniforge yet. Re-run migration / fix failed envs first."
+      warn "Skip removal: some envs are not present in Miniforge yet. Re-run migration / fix failed envs first."
+      REMOVE_MINICONDA_SKIPPED=1
+      REMOVE_MINICONDA_SKIP_REASON="Some envs not migrated"
+      return 0
     fi
   fi
 
@@ -1523,6 +1578,11 @@ fi
 
 remove_miniconda_safely
 
+if [[ -n "${FAILED_ENVS}" ]]; then
+  warn "Some envs failed to migrate and require manual rebuild: ${FAILED_ENVS}"
+  warn "Tip: fix the exported YAML under $EXPORT_DIR and run: conda env create -f <yml> -n <env>"
+fi
+
 if ! final_compliance_summary; then
   if [[ "$STRICT_EXIT" == "1" ]]; then
     warn "STRICT_EXIT=1: exiting with non-zero due to post-migration compliance risk."
@@ -1554,5 +1614,14 @@ Backups created by this script (rc/yml/etc) are centralized here:
 After confirming conda works and envs are OK, you can review and delete that directory if desired.
 
 If using fish: open a new fish session (or run: exec fish).
+
+EOF
+
+if [[ "$REMOVE_MINICONDA_SKIPPED" == "1" && -n "${MINICONDA_DIR:-}" && -d "$MINICONDA_DIR" ]]; then
+  cat <<EOF
+Note:
+  - Miniconda still exists at: $MINICONDA_DIR (${REMOVE_MINICONDA_SKIP_REASON})
+  - To remove later (non-interactive):
+      REMOVE_MINICONDA=1 MINICONDA_DELETE_BACKUP=1 bash "$0"
 
 EOF
